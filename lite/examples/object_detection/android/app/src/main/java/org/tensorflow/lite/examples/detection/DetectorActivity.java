@@ -27,6 +27,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.media.ImageReader.OnImageAvailableListener;
 import android.os.SystemClock;
+import android.os.Trace;
 import android.util.Size;
 import android.util.TypedValue;
 import android.widget.Toast;
@@ -161,7 +162,10 @@ public class DetectorActivity extends CameraActivity implements OnImageAvailable
     computingDetection = true;
     LOGGER.i("Preparing image " + currTimestamp + " for detection in bg thread.");
 
+    Trace.beginSection("convertRawData");
+    final long captureTimeStart = SystemClock.elapsedRealtime();
     rgbFrameBitmap.setPixels(getRgbBytes(), 0, previewWidth, 0, 0, previewWidth, previewHeight);
+    Trace.endSection();
 
     readyForNextImage();
 
@@ -178,8 +182,10 @@ public class DetectorActivity extends CameraActivity implements OnImageAvailable
           public void run() {
             LOGGER.i("Running detection on image " + currTimestamp);
             final long startTime = SystemClock.uptimeMillis();
-            final List<Classifier.Recognition> results = detector.recognizeImage(croppedBitmap);
+            final List<Classifier.Recognition> results = detector.recognizeImage(croppedBitmap, SystemClock.elapsedRealtime() - captureTimeStart /* capture time */);
             lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
+
+            Trace.beginSection("drawResults");
 
             cropCopyBitmap = Bitmap.createBitmap(croppedBitmap);
             final Canvas canvas = new Canvas(cropCopyBitmap);
@@ -211,6 +217,8 @@ public class DetectorActivity extends CameraActivity implements OnImageAvailable
             }
 
             tracker.trackResults(mappedRecognitions, currTimestamp);
+            Trace.endSection();
+
             trackingOverlay.postInvalidate();
 
             computingDetection = false;

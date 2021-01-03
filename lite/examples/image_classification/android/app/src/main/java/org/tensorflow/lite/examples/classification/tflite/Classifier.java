@@ -15,12 +15,22 @@ limitations under the License.
 
 package org.tensorflow.lite.examples.classification.tflite;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.RectF;
 import android.os.SystemClock;
 import android.os.Trace;
+
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.lang.reflect.Array;
 import java.nio.MappedByteBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -33,6 +43,7 @@ import org.tensorflow.lite.examples.classification.env.Logger;
 import org.tensorflow.lite.examples.classification.tflite.Classifier.Device;
 import org.tensorflow.lite.gpu.GpuDelegate;
 import org.tensorflow.lite.nnapi.NnApiDelegate;
+import org.tensorflow.lite.HexagonDelegate;
 import org.tensorflow.lite.support.common.FileUtil;
 import org.tensorflow.lite.support.common.TensorOperator;
 import org.tensorflow.lite.support.common.TensorProcessor;
@@ -46,7 +57,7 @@ import org.tensorflow.lite.support.label.TensorLabel;
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 
 /** A classifier specialized to label images using TensorFlow Lite. */
-public abstract class Classifier {
+public abstract class Classifier extends AppCompatActivity {
   private static final Logger LOGGER = new Logger();
 
   /** The model type used for classification. */
@@ -54,14 +65,19 @@ public abstract class Classifier {
     FLOAT_MOBILENET,
     QUANTIZED_MOBILENET,
     FLOAT_EFFICIENTNET,
-    QUANTIZED_EFFICIENTNET
+    QUANTIZED_EFFICIENTNET,
+    FLOAT_INCEPTION,
+    QUANTIZED_INCEPTION
   }
 
   /** The runtime device type used for executing classification. */
   public enum Device {
     CPU,
     NNAPI,
-    GPU
+    DSP,
+    GPU,
+    NNAPI_DSP,
+    NNAPI_GPU
   }
 
   /** Number of results to show in the UI. */
@@ -82,6 +98,13 @@ public abstract class Classifier {
   /** Optional NNAPI delegate for accleration. */
   private NnApiDelegate nnApiDelegate = null;
 
+  private NnApiDelegate.Options nnapiOptions = null;
+
+  /** Optional Hexagon DSP delegate for accleration. */
+  private HexagonDelegate hexagonDelegate = null;
+
+  private String delegateName = "";
+
   /** An instance of the driver class to run model inference with Tensorflow Lite. */
   protected Interpreter tflite;
 
@@ -100,6 +123,13 @@ public abstract class Classifier {
   /** Processer to apply post processing of the output probability. */
   private final TensorProcessor probabilityProcessor;
 
+  private final ArrayList<Long> capture_times = new ArrayList<Long>();
+  private final ArrayList<Long> preproc_times = new ArrayList<Long>();
+  private final ArrayList<Long> postproc_times = new ArrayList<Long>();
+  private final ArrayList<Long> inference_times = new ArrayList<Long>();
+
+  private final static int PERMISSION_REQUEST_CODE = 1;
+
   /**
    * Creates a classifier with the provided configuration.
    *
@@ -109,19 +139,46 @@ public abstract class Classifier {
    * @param numThreads The number of threads to use for classification.
    * @return A classifier with the desired configuration.
    */
-  public static Classifier create(Activity activity, Model model, Device device, int numThreads)
+  public static Classifier create(Activity activity, Model model, int nnapiOption, Device device, int numThreads)
       throws IOException {
+
+    if(ContextCompat.checkSelfPermission(activity,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED)
+    {
+      LOGGER.d("REQUESTING PERMISSION");
+      ActivityCompat.requestPermissions(activity,
+              new String[]{Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE},
+              1);
+      LOGGER.d("REQUESTED PERMISSION");
+    }
+
     if (model == Model.QUANTIZED_MOBILENET) {
-      return new ClassifierQuantizedMobileNet(activity, device, numThreads);
+      return new ClassifierQuantizedMobileNet(activity, nnapiOption, device, numThreads);
     } else if (model == Model.FLOAT_MOBILENET) {
-      return new ClassifierFloatMobileNet(activity, device, numThreads);
+      return new ClassifierFloatMobileNet(activity, nnapiOption, device, numThreads);
     } else if (model == Model.FLOAT_EFFICIENTNET) {
-      return new ClassifierFloatEfficientNet(activity, device, numThreads);
+      return new ClassifierFloatEfficientNet(activity, nnapiOption, device, numThreads);
     } else if (model == Model.QUANTIZED_EFFICIENTNET) {
-      return new ClassifierQuantizedEfficientNet(activity, device, numThreads);
+      return new ClassifierQuantizedEfficientNet(activity, nnapiOption, device, numThreads);
+    } else if (model == Model.FLOAT_INCEPTION) {
+      return new ClassifierFloatInception(activity, nnapiOption, device, numThreads);
+    } else if (model == Model.QUANTIZED_INCEPTION) {
+      return new ClassifierQuantizedInception(activity, nnapiOption, device, numThreads);
     } else {
       throw new UnsupportedOperationException();
     }
+  }
+
+  private double calculateAverage(List <Long> marks) {
+    Double sum = 0D;
+    if(!marks.isEmpty()) {
+      for (Long mark : marks) {
+        sum += mark;
+      }
+      return sum.doubleValue() / marks.size();
+    }
+    return sum;
   }
 
   /** An immutable result returned by a Classifier describing what was recognized. */
@@ -194,19 +251,48 @@ public abstract class Classifier {
     }
   }
 
+  private String enum2acceleratorName(Device device)
+  {
+    switch (device)
+    {
+      case NNAPI_DSP: return "qti-dsp";
+      case NNAPI_GPU: return "qti-gpu";
+      case NNAPI: return "nnapi";
+      case GPU: return "gpu";
+      case DSP: return "dsp";
+      case CPU: return "cpu";
+    }
+    return "";
+  }
+
   /** Initializes a {@code Classifier}. */
-  protected Classifier(Activity activity, Device device, int numThreads) throws IOException {
+  protected Classifier(Activity activity, int nnapiOption, Device device, int numThreads) throws IOException {
     tfliteModel = FileUtil.loadMappedFile(activity, getModelPath());
+    nnapiOptions = new NnApiDelegate.Options();
+    nnapiOptions.setExecutionPreference(nnapiOption);
+
     switch (device) {
+      case NNAPI_DSP:
+      case NNAPI_GPU:
+        nnapiOptions.setAcceleratorName(enum2acceleratorName(device));
       case NNAPI:
-        nnApiDelegate = new NnApiDelegate();
+        LOGGER.d("Creating a delegate with preference: " + nnapiOption);
+        nnApiDelegate = new NnApiDelegate(nnapiOptions);
         tfliteOptions.addDelegate(nnApiDelegate);
+        delegateName = "nnapi";
         break;
       case GPU:
         gpuDelegate = new GpuDelegate();
         tfliteOptions.addDelegate(gpuDelegate);
+        delegateName = "gpu";
+        break;
+      case DSP:
+        hexagonDelegate = new HexagonDelegate(activity);
+        tfliteOptions.addDelegate(hexagonDelegate);
+        delegateName = "hexagon";
         break;
       case CPU:
+        delegateName = "cpu";
         break;
     }
     tfliteOptions.setNumThreads(numThreads);
@@ -239,16 +325,17 @@ public abstract class Classifier {
   }
 
   /** Runs inference and returns the classification results. */
-  public List<Recognition> recognizeImage(final Bitmap bitmap, int sensorOrientation) {
+  public List<Recognition> recognizeImage(final Bitmap bitmap, int sensorOrientation, long data) throws IOException {
+    // LOGGER.d(String.format("%d", preproc_times.size()));
     // Logs this method so that it can be analyzed with systrace.
     Trace.beginSection("recognizeImage");
 
-    Trace.beginSection("loadImage");
+    // Trace.beginSection("loadImage");
     long startTimeForLoadImage = SystemClock.uptimeMillis();
     inputImageBuffer = loadImage(bitmap, sensorOrientation);
     long endTimeForLoadImage = SystemClock.uptimeMillis();
-    Trace.endSection();
-    LOGGER.v("Timecost to load the image: " + (endTimeForLoadImage - startTimeForLoadImage));
+    // Trace.endSection();
+    // LOGGER.d("Timecost to load the image: " + (endTimeForLoadImage - startTimeForLoadImage));
 
     // Runs the inference call.
     Trace.beginSection("runInference");
@@ -256,16 +343,65 @@ public abstract class Classifier {
     tflite.run(inputImageBuffer.getBuffer(), outputProbabilityBuffer.getBuffer().rewind());
     long endTimeForReference = SystemClock.uptimeMillis();
     Trace.endSection();
-    LOGGER.v("Timecost to run model inference: " + (endTimeForReference - startTimeForReference));
+    // LOGGER.d("Timecost to run model inference: " + (endTimeForReference - startTimeForReference));
 
+    Trace.beginSection("postProcess");
+    long startTimeForPostproc = SystemClock.uptimeMillis();
     // Gets the map of label and probability.
     Map<String, Float> labeledProbability =
         new TensorLabel(labels, probabilityProcessor.process(outputProbabilityBuffer))
             .getMapWithFloatValue();
-    Trace.endSection();
 
     // Gets top-k results.
-    return getTopKProbability(labeledProbability);
+    List<Recognition> topK = getTopKProbability(labeledProbability);
+    long endTimeForPostproc = SystemClock.uptimeMillis();
+    Trace.endSection(); // postProcess
+
+    Trace.endSection(); // recognizeImage
+
+    capture_times.add(data);
+    preproc_times.add(endTimeForLoadImage - startTimeForLoadImage);
+    postproc_times.add(endTimeForPostproc - startTimeForPostproc);
+    inference_times.add(endTimeForReference - startTimeForReference);
+
+    //if(preproc_times.size() == 100) {
+    //  String cost_str = String.format("Timecosts: %f %f %f %f", calculateAverage(capture_times), calculateAverage(preproc_times), calculateAverage(inference_times), calculateAverage(postproc_times));
+    //  LOGGER.d(cost_str);
+//
+    //  capture_times.clear();
+    //  preproc_times.clear();
+    //  postproc_times.clear();
+    //  inference_times.clear();
+//
+    //  System.exit(0);
+    //}
+
+    //if(preproc_times.size() == 1200)
+    //{
+    //  String filename = "/sdcard/app_distributions/classify/" + this.getModelPath().toLowerCase() + "_" + this.delegateName + ".csv";
+    //  LOGGER.d("Saving to " + filename);
+    //  BufferedWriter br = new BufferedWriter(new FileWriter(filename));
+    //  StringBuilder sb = new StringBuilder();
+//
+    //  // Append strings from array
+    //  for (int i = 0; i < preproc_times.size(); ++i) {
+    //    sb.append(Long.toString(capture_times.get(i)));
+    //    sb.append(",");
+    //    sb.append(Long.toString(preproc_times.get(i)));
+    //    sb.append(",");
+    //    sb.append(Long.toString(inference_times.get(i)));
+    //    sb.append(",");
+    //    sb.append(Long.toString(postproc_times.get(i)));
+    //    sb.append("\n");
+    //  }
+//
+    //  br.write(sb.toString());
+    //  br.close();
+    //  System.exit(0);
+    //}
+
+    // LOGGER.d("Timecost to post-process (i.e., select topK) results: " + (endTimeForPostproc - startTimeForPostproc));
+    return topK;
   }
 
   /** Closes the interpreter and model to release resources. */
@@ -281,6 +417,10 @@ public abstract class Classifier {
     if (nnApiDelegate != null) {
       nnApiDelegate.close();
       nnApiDelegate = null;
+    }
+    if (hexagonDelegate != null) {
+      hexagonDelegate.close();
+      hexagonDelegate = null;
     }
     tfliteModel = null;
   }
@@ -298,20 +438,52 @@ public abstract class Classifier {
   /** Loads input image, and applies preprocessing. */
   private TensorImage loadImage(final Bitmap bitmap, int sensorOrientation) {
     // Loads bitmap into a TensorImage.
+    Trace.beginSection("loadImage");
     inputImageBuffer.load(bitmap);
+    Trace.endSection();
 
+    Trace.beginSection("preProcess");
     // Creates processor for the TensorImage.
     int cropSize = Math.min(bitmap.getWidth(), bitmap.getHeight());
     int numRotation = sensorOrientation / 90;
     // TODO(b/143564309): Fuse ops inside ImageProcessor.
-    ImageProcessor imageProcessor =
-        new ImageProcessor.Builder()
-            .add(new ResizeWithCropOrPadOp(cropSize, cropSize))
-            .add(new ResizeOp(imageSizeX, imageSizeY, ResizeMethod.NEAREST_NEIGHBOR))
-            .add(new Rot90Op(numRotation))
-            .add(getPreprocessNormalizeOp())
-            .build();
-    return imageProcessor.process(inputImageBuffer);
+    if(true) {
+      ImageProcessor imageProcessor =
+              new ImageProcessor.Builder()
+                      .add(new ResizeWithCropOrPadOp(cropSize, cropSize))
+                      .add(new ResizeOp(imageSizeX, imageSizeY, ResizeMethod.NEAREST_NEIGHBOR))
+                      .add(new Rot90Op(numRotation))
+                      .add(getPreprocessNormalizeOp())
+                      .build();
+
+      TensorImage ret = imageProcessor.process(inputImageBuffer);
+
+      Trace.endSection();
+      return ret;
+    } else { // BELOW IS FOR TRACING
+      ImageProcessor imageProcessor = new ImageProcessor.Builder().add(new ResizeWithCropOrPadOp(cropSize, cropSize)).build();
+      Trace.beginSection("crop/pad");
+      TensorImage ret = imageProcessor.process(inputImageBuffer);
+      Trace.endSection();
+
+      imageProcessor = new ImageProcessor.Builder().add(new ResizeOp(imageSizeX, imageSizeY, ResizeMethod.NEAREST_NEIGHBOR)).build();
+      Trace.beginSection("resize");
+      ret = imageProcessor.process(ret);
+      Trace.endSection();
+
+      imageProcessor = new ImageProcessor.Builder().add(new Rot90Op(numRotation)).build();
+      Trace.beginSection("rotate");
+      ret = imageProcessor.process(ret);
+      Trace.endSection();
+
+      imageProcessor = new ImageProcessor.Builder().add(getPreprocessNormalizeOp()).build();
+      Trace.beginSection("normalize");
+      ret = imageProcessor.process(ret);
+      Trace.endSection();
+
+      Trace.endSection();
+      return ret;
+    }
   }
 
   /** Gets the top-k results. */

@@ -41,9 +41,9 @@ public class ClassifierQuantizedEfficientNet extends Classifier {
    *
    * @param activity
    */
-  public ClassifierQuantizedEfficientNet(Activity activity, Device device, int numThreads)
+  public ClassifierQuantizedEfficientNet(Activity activity, int nnapiOption, Device device, int numThreads)
       throws IOException {
-    super(activity, device, numThreads);
+    super(activity, nnapiOption, device, numThreads);
   }
 
   @Override

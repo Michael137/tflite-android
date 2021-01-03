@@ -42,9 +42,9 @@ public class ClassifierFloatMobileNet extends Classifier {
    *
    * @param activity
    */
-  public ClassifierFloatMobileNet(Activity activity, Device device, int numThreads)
+  public ClassifierFloatMobileNet(Activity activity, int nnapiOption, Device device, int numThreads)
       throws IOException {
-    super(activity, device, numThreads);
+    super(activity, nnapiOption, device, numThreads);
   }
 
   @Override

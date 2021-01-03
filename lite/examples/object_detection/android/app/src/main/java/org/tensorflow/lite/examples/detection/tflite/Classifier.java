@@ -21,7 +21,7 @@ import java.util.List;
 
 /** Generic interface for interacting with different recognition engines. */
 public interface Classifier {
-  List<Recognition> recognizeImage(Bitmap bitmap);
+  List<Recognition> recognizeImage(Bitmap bitmap, long time);
 
   void enableStatLogging(final boolean debug);
 

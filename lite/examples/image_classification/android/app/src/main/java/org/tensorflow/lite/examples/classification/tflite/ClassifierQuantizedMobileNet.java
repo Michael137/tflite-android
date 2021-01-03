@@ -42,9 +42,9 @@ public class ClassifierQuantizedMobileNet extends Classifier {
    *
    * @param activity
    */
-  public ClassifierQuantizedMobileNet(Activity activity, Device device, int numThreads)
+  public ClassifierQuantizedMobileNet(Activity activity, int nnapiOption, Device device, int numThreads)
       throws IOException {
-    super(activity, device, numThreads);
+    super(activity, nnapiOption, device, numThreads);
   }
 
   @Override

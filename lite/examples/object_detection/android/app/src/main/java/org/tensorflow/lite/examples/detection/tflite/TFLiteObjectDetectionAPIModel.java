@@ -19,9 +19,12 @@ import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.RectF;
+import android.os.SystemClock;
 import android.os.Trace;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.FileInputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -36,6 +39,7 @@ import java.util.Map;
 import java.util.Vector;
 import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.examples.detection.env.Logger;
+import org.tensorflow.lite.nnapi.NnApiDelegate;
 
 /**
  * Wrapper for frozen detection models trained using the Tensorflow Object Detection API:
@@ -47,6 +51,13 @@ import org.tensorflow.lite.examples.detection.env.Logger;
  * - https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tensorflowlite.md#running-our-model-on-android
  */
 public class TFLiteObjectDetectionAPIModel implements Classifier {
+
+  /** The runtime device type used for executing classification. */
+  public enum Device {
+    CPU,
+    NNAPI
+  }
+
   private static final Logger LOGGER = new Logger();
 
   // Only return this many results.
@@ -79,6 +90,11 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
 
   private Interpreter tfLite;
 
+  private final ArrayList<Long> capture_times = new ArrayList<Long>();
+  private final ArrayList<Long> preproc_times = new ArrayList<Long>();
+  private final ArrayList<Long> postproc_times = new ArrayList<Long>();
+  private final ArrayList<Long> inference_times = new ArrayList<Long>();
+
   private TFLiteObjectDetectionAPIModel() {}
 
   /** Memory-map the model file in Assets. */
@@ -90,6 +106,17 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
     long startOffset = fileDescriptor.getStartOffset();
     long declaredLength = fileDescriptor.getDeclaredLength();
     return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+  }
+
+  private double calculateAverage(List <Long> marks) {
+    Double sum = 0D;
+    if(!marks.isEmpty()) {
+      for (Long mark : marks) {
+        sum += mark;
+      }
+      return sum.doubleValue() / marks.size();
+    }
+    return sum;
   }
 
   /**
@@ -108,7 +135,14 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
       final int inputSize,
       final boolean isQuantized)
       throws IOException {
-    final TFLiteObjectDetectionAPIModel d = new TFLiteObjectDetectionAPIModel();
+
+    /** Options for configuring the Interpreter. */
+    Interpreter.Options tfliteOptions = new Interpreter.Options();
+
+    /** Optional NNAPI delegate for accleration. */
+    NnApiDelegate nnApiDelegate = null;
+    NnApiDelegate.Options nnapiOptions = null;
+    TFLiteObjectDetectionAPIModel d = new TFLiteObjectDetectionAPIModel();
 
     String actualFilename = labelFilename.split("file:///android_asset/")[1];
     InputStream labelsInput = assetManager.open(actualFilename);
@@ -123,7 +157,15 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
     d.inputSize = inputSize;
 
     try {
-      d.tfLite = new Interpreter(loadModelFile(assetManager, modelFilename));
+      MappedByteBuffer tfliteModel = loadModelFile(assetManager, modelFilename);
+      tfliteOptions.setNumThreads(NUM_THREADS);
+      if(false) { // USE NNAPI?
+        LOGGER.d("USING NNAPI");
+        nnApiDelegate = new NnApiDelegate();
+        tfliteOptions.addDelegate(nnApiDelegate);
+      }
+
+      d.tfLite = new Interpreter(tfliteModel,tfliteOptions);
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
@@ -140,7 +182,6 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
     d.imgData.order(ByteOrder.nativeOrder());
     d.intValues = new int[d.inputSize * d.inputSize];
 
-    d.tfLite.setNumThreads(NUM_THREADS);
     d.outputLocations = new float[1][NUM_DETECTIONS][4];
     d.outputClasses = new float[1][NUM_DETECTIONS];
     d.outputScores = new float[1][NUM_DETECTIONS];
@@ -149,11 +190,12 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
   }
 
   @Override
-  public List<Recognition> recognizeImage(final Bitmap bitmap) {
+  public List<Recognition> recognizeImage(final Bitmap bitmap, long time) {
     // Log this method so that it can be analyzed with systrace.
     Trace.beginSection("recognizeImage");
 
-    Trace.beginSection("preprocessBitmap");
+    Trace.beginSection("preProcessing");
+    final long preproc_start = SystemClock.elapsedRealtime();
     // Preprocess the image data from 0-255 int to normalized float based
     // on the provided parameters.
     bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
@@ -174,10 +216,11 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
         }
       }
     }
-    Trace.endSection(); // preprocessBitmap
+    final long preproc_time = SystemClock.elapsedRealtime() - preproc_start;
+    // Trace.endSection(); // preprocessBitmap
 
     // Copy the input data into TensorFlow.
-    Trace.beginSection("feed");
+    // Trace.beginSection("feed");
     outputLocations = new float[1][NUM_DETECTIONS][4];
     outputClasses = new float[1][NUM_DETECTIONS];
     outputScores = new float[1][NUM_DETECTIONS];
@@ -192,13 +235,18 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
     Trace.endSection();
 
     // Run the inference call.
-    Trace.beginSection("run");
+    Trace.beginSection("runObjectDetection");
+    long startInferenceTime = SystemClock.elapsedRealtime();
     tfLite.runForMultipleInputsOutputs(inputArray, outputMap);
+    long inference_time = SystemClock.elapsedRealtime() - startInferenceTime;
     Trace.endSection();
+
+    Trace.beginSection("postProcess");
+    final long startPostProcess = SystemClock.elapsedRealtime();
 
     // Show the best detections.
     // after scaling them back to the input size.
-      
+
     // You need to use the number of detections from the output and not the NUM_DETECTONS variable declared on top
       // because on some models, they don't always output the same total number of detections
       // For example, your model's NUM_DETECTIONS = 20, but sometimes it only outputs 16 predictions
@@ -224,7 +272,26 @@ public class TFLiteObjectDetectionAPIModel implements Classifier {
               outputScores[0][i],
               detection));
     }
+    final long postproc_time = SystemClock.elapsedRealtime() - startPostProcess;
+    Trace.endSection(); // postProcess
+
     Trace.endSection(); // "recognizeImage"
+
+    capture_times.add(time);
+    preproc_times.add(preproc_time);
+    postproc_times.add(postproc_time);
+    inference_times.add(inference_time);
+
+    if(preproc_times.size() == 750) {
+      String cost_str = String.format("Timecosts: %f %f %f %f", calculateAverage(capture_times), calculateAverage(preproc_times), calculateAverage(inference_times), calculateAverage(postproc_times));
+      LOGGER.d(cost_str);
+
+      capture_times.clear();
+      preproc_times.clear();
+      postproc_times.clear();
+      inference_times.clear();
+    }
+
     return recognitions;
   }
 

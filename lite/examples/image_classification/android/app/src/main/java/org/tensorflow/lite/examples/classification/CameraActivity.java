@@ -33,6 +33,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.os.Trace;
 import androidx.annotation.NonNull;
 import androidx.annotation.UiThread;
@@ -49,6 +50,8 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 import com.google.android.material.bottomsheet.BottomSheetBehavior;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import org.tensorflow.lite.examples.classification.env.ImageUtils;
@@ -56,6 +59,7 @@ import org.tensorflow.lite.examples.classification.env.Logger;
 import org.tensorflow.lite.examples.classification.tflite.Classifier.Device;
 import org.tensorflow.lite.examples.classification.tflite.Classifier.Model;
 import org.tensorflow.lite.examples.classification.tflite.Classifier.Recognition;
+import org.tensorflow.lite.nnapi.NnApiDelegate;
 
 public abstract class CameraActivity extends AppCompatActivity
     implements OnImageAvailableListener,
@@ -95,12 +99,26 @@ public abstract class CameraActivity extends AppCompatActivity
   protected ImageView bottomSheetArrowImageView;
   private ImageView plusImageView, minusImageView;
   private Spinner modelSpinner;
+  private Spinner optionSpinner;
   private Spinner deviceSpinner;
   private TextView threadsTextView;
 
   private Model model = Model.QUANTIZED_EFFICIENTNET;
+  private int nnapiOption = NnApiDelegate.Options.EXECUTION_PREFERENCE_UNDEFINED;
   private Device device = Device.CPU;
   private int numThreads = -1;
+
+  private int string2nnapiOption(String optionString) {
+    if(optionString.equals("FAST SINGLE ANSWER")) {
+      return NnApiDelegate.Options.EXECUTION_PREFERENCE_FAST_SINGLE_ANSWER;
+    } else if(optionString.equals("SUSTAINED SPEED")) {
+      return NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED;
+    } else if(optionString.equals("LOW POWER")) {
+      return NnApiDelegate.Options.EXECUTION_PREFERENCE_LOW_POWER;
+    } else {
+      return NnApiDelegate.Options.EXECUTION_PREFERENCE_UNDEFINED;
+    }
+  }
 
   @Override
   protected void onCreate(final Bundle savedInstanceState) {
@@ -120,6 +138,7 @@ public abstract class CameraActivity extends AppCompatActivity
     plusImageView = findViewById(R.id.plus);
     minusImageView = findViewById(R.id.minus);
     modelSpinner = findViewById(R.id.model_spinner);
+    optionSpinner = findViewById(R.id.option_spinner);
     deviceSpinner = findViewById(R.id.device_spinner);
     bottomSheetLayout = findViewById(R.id.bottom_sheet_layout);
     gestureLayout = findViewById(R.id.gesture_layout);
@@ -187,12 +206,14 @@ public abstract class CameraActivity extends AppCompatActivity
     inferenceTimeTextView = findViewById(R.id.inference_info);
 
     modelSpinner.setOnItemSelectedListener(this);
+    optionSpinner.setOnItemSelectedListener(this);
     deviceSpinner.setOnItemSelectedListener(this);
 
     plusImageView.setOnClickListener(this);
     minusImageView.setOnClickListener(this);
 
     model = Model.valueOf(modelSpinner.getSelectedItem().toString().toUpperCase());
+    nnapiOption = string2nnapiOption(optionSpinner.getSelectedItem().toString().toUpperCase());
     device = Device.valueOf(deviceSpinner.getSelectedItem().toString());
     numThreads = Integer.parseInt(threadsTextView.getText().toString().trim());
   }
@@ -252,7 +273,12 @@ public abstract class CameraActivity extends AppCompatActivity
             isProcessingFrame = false;
           }
         };
-    processImage();
+    LOGGER.w("USING OLD CAMERA API");
+    try {
+      processImage();
+    } catch (IOException e) {
+      e.printStackTrace();
+    }
   }
 
   /** Callback for Camera2 API */
@@ -266,7 +292,9 @@ public abstract class CameraActivity extends AppCompatActivity
       rgbBytes = new int[previewWidth * previewHeight];
     }
     try {
+      Trace.beginSection("captureData");
       final Image image = reader.acquireLatestImage();
+      Trace.endSection();
 
       if (image == null) {
         return;
@@ -276,8 +304,8 @@ public abstract class CameraActivity extends AppCompatActivity
         image.close();
         return;
       }
+
       isProcessingFrame = true;
-      Trace.beginSection("imageAvailable");
       final Plane[] planes = image.getPlanes();
       fillBytes(planes, yuvBytes);
       yRowStride = planes[0].getRowStride();
@@ -316,7 +344,6 @@ public abstract class CameraActivity extends AppCompatActivity
       Trace.endSection();
       return;
     }
-    Trace.endSection();
   }
 
   @Override
@@ -572,11 +599,22 @@ public abstract class CameraActivity extends AppCompatActivity
   protected Model getModel() {
     return model;
   }
+  protected int getOption() {
+    return nnapiOption;
+  }
 
   private void setModel(Model model) {
     if (this.model != model) {
       LOGGER.d("Updating  model: " + model);
       this.model = model;
+      onInferenceConfigurationChanged();
+    }
+  }
+
+  private void setOption(int option) {
+    if (this.nnapiOption != option) {
+      LOGGER.d("Updating  option: " + option);
+      this.nnapiOption = option;
       onInferenceConfigurationChanged();
     }
   }
@@ -609,7 +647,7 @@ public abstract class CameraActivity extends AppCompatActivity
     }
   }
 
-  protected abstract void processImage();
+  protected abstract void processImage() throws IOException;
 
   protected abstract void onPreviewSizeChosen(final Size size, final int rotation);
 
@@ -642,6 +680,8 @@ public abstract class CameraActivity extends AppCompatActivity
   public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
     if (parent == modelSpinner) {
       setModel(Model.valueOf(parent.getItemAtPosition(pos).toString().toUpperCase()));
+    } else if (parent == optionSpinner) {
+      setOption(string2nnapiOption(parent.getItemAtPosition(pos).toString().toUpperCase()));
     } else if (parent == deviceSpinner) {
       setDevice(Device.valueOf(parent.getItemAtPosition(pos).toString()));
     }

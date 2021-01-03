@@ -21,6 +21,7 @@ import android.graphics.Bitmap.Config;
 import android.graphics.Typeface;
 import android.media.ImageReader.OnImageAvailableListener;
 import android.os.SystemClock;
+import android.os.Trace;
 import android.util.Size;
 import android.util.TypedValue;
 import android.widget.Toast;
@@ -64,7 +65,7 @@ public class ClassifierActivity extends CameraActivity implements OnImageAvailab
     borderedText = new BorderedText(textSizePx);
     borderedText.setTypeface(Typeface.MONOSPACE);
 
-    recreateClassifier(getModel(), getDevice(), getNumThreads());
+    recreateClassifier(getModel(), getOption(), getDevice(), getNumThreads());
     if (classifier == null) {
       LOGGER.e("No classifier on preview!");
       return;
@@ -81,8 +82,11 @@ public class ClassifierActivity extends CameraActivity implements OnImageAvailab
   }
 
   @Override
-  protected void processImage() {
+  protected void processImage() throws IOException {
+    long captureStart = SystemClock.elapsedRealtime();
+    Trace.beginSection("convertRawData");
     rgbFrameBitmap.setPixels(getRgbBytes(), 0, previewWidth, 0, 0, previewWidth, previewHeight);
+    Trace.endSection();
     final int cropSize = Math.min(previewWidth, previewHeight);
 
     runInBackground(
@@ -91,23 +95,28 @@ public class ClassifierActivity extends CameraActivity implements OnImageAvailab
           public void run() {
             if (classifier != null) {
               final long startTime = SystemClock.uptimeMillis();
-              final List<Classifier.Recognition> results =
-                  classifier.recognizeImage(rgbFrameBitmap, sensorOrientation);
-              lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
-              LOGGER.v("Detect: %s", results);
+              final List<Classifier.Recognition> results;
+              try {
+                results = classifier.recognizeImage(rgbFrameBitmap, sensorOrientation,
+                        SystemClock.elapsedRealtime() - captureStart);
+                lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
+                LOGGER.v("Detect: %s", results);
 
-              runOnUiThread(
-                  new Runnable() {
-                    @Override
-                    public void run() {
-                      showResultsInBottomSheet(results);
-                      showFrameInfo(previewWidth + "x" + previewHeight);
-                      showCropInfo(imageSizeX + "x" + imageSizeY);
-                      showCameraResolution(cropSize + "x" + cropSize);
-                      showRotationInfo(String.valueOf(sensorOrientation));
-                      showInference(lastProcessingTimeMs + "ms");
-                    }
-                  });
+                runOnUiThread(
+                        new Runnable() {
+                          @Override
+                          public void run() {
+                            showResultsInBottomSheet(results);
+                            showFrameInfo(previewWidth + "x" + previewHeight);
+                            showCropInfo(imageSizeX + "x" + imageSizeY);
+                            showCameraResolution(cropSize + "x" + cropSize);
+                            showRotationInfo(String.valueOf(sensorOrientation));
+                            showInference(lastProcessingTimeMs + "ms");
+                          }
+                        });
+              } catch (IOException e) {
+                e.printStackTrace();
+              }
             }
             readyForNextImage();
           }
@@ -122,18 +131,19 @@ public class ClassifierActivity extends CameraActivity implements OnImageAvailab
     }
     final Device device = getDevice();
     final Model model = getModel();
+    final int nnapiOption = getOption();
     final int numThreads = getNumThreads();
-    runInBackground(() -> recreateClassifier(model, device, numThreads));
+    runInBackground(() -> recreateClassifier(model, nnapiOption, device, numThreads));
   }
 
-  private void recreateClassifier(Model model, Device device, int numThreads) {
+  private void recreateClassifier(Model model, int nnapiOption, Device device, int numThreads) {
     if (classifier != null) {
       LOGGER.d("Closing classifier.");
       classifier.close();
       classifier = null;
     }
     if (device == Device.GPU
-        && (model == Model.QUANTIZED_MOBILENET || model == Model.QUANTIZED_EFFICIENTNET)) {
+        && (model == Model.QUANTIZED_MOBILENET || model == Model.QUANTIZED_EFFICIENTNET || model == Model.QUANTIZED_INCEPTION)) {
       LOGGER.d("Not creating classifier: GPU doesn't support quantized models.");
       runOnUiThread(
           () -> {
@@ -144,7 +154,7 @@ public class ClassifierActivity extends CameraActivity implements OnImageAvailab
     try {
       LOGGER.d(
           "Creating classifier (model=%s, device=%s, numThreads=%d)", model, device, numThreads);
-      classifier = Classifier.create(this, model, device, numThreads);
+      classifier = Classifier.create(this, model, nnapiOption, device, numThreads);
     } catch (IOException e) {
       LOGGER.e(e, "Failed to create classifier.");
     }

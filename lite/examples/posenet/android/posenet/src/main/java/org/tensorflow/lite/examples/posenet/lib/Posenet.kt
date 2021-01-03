@@ -18,6 +18,7 @@ package org.tensorflow.lite.examples.posenet.lib
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.os.Trace
 import android.util.Log
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -27,6 +28,7 @@ import java.nio.channels.FileChannel
 import kotlin.math.exp
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 
 enum class BodyPart {
   NOSE,
@@ -73,14 +75,21 @@ enum class Device {
 class Posenet(
   val context: Context,
   val filename: String = "posenet_model.tflite",
-  val device: Device = Device.CPU
+  val device: Device = Device.NNAPI
 ) : AutoCloseable {
   var lastInferenceTimeNanos: Long = -1
+  var lastPreprocStartTimeMillis: Long = 0
+  var captureTimesMillis = arrayListOf<Long>()
+  var preprocTimesMillis = arrayListOf<Long>()
+  var postprocTimesMillis = arrayListOf<Long>()
+  var inferenceTimesMillis = arrayListOf<Long>()
+  var device_name = ""
     private set
 
   /** An Interpreter for the TFLite model.   */
   private var interpreter: Interpreter? = null
   private var gpuDelegate: GpuDelegate? = null
+  private var nnapiDelegate: NnApiDelegate? = null
   private val NUM_LITE_THREADS = 4
 
   private fun getInterpreter(): Interpreter {
@@ -90,12 +99,20 @@ class Posenet(
     val options = Interpreter.Options()
     options.setNumThreads(NUM_LITE_THREADS)
     when (device) {
-      Device.CPU -> { }
+      Device.CPU -> { device_name = "cpu" }
       Device.GPU -> {
         gpuDelegate = GpuDelegate()
         options.addDelegate(gpuDelegate)
+        device_name = "gpu"
       }
-      Device.NNAPI -> options.setUseNNAPI(true)
+      Device.NNAPI -> {
+        nnapiDelegate = NnApiDelegate()
+        options.addDelegate(nnapiDelegate)
+        device_name = "nnapi"
+      }
+      Device.NNAPI -> {
+        options.setUseNNAPI(true)
+      }
     }
     interpreter = Interpreter(loadModelFile(filename, context), options)
     return interpreter!!
@@ -106,6 +123,8 @@ class Posenet(
     interpreter = null
     gpuDelegate?.close()
     gpuDelegate = null
+    nnapiDelegate?.close()
+    nnapiDelegate = null
   }
 
   /** Returns value within [0,1].   */
@@ -194,26 +213,21 @@ class Posenet(
    *      person: a Person object containing data about keypoint locations and confidence scores
    */
   fun estimateSinglePose(bitmap: Bitmap): Person {
-    val estimationStartTimeNanos = SystemClock.elapsedRealtimeNanos()
     val inputArray = arrayOf(initInputArray(bitmap))
-    Log.i(
-      "posenet",
-      String.format(
-        "Scaling to [-1,1] took %.2f ms",
-        1.0f * (SystemClock.elapsedRealtimeNanos() - estimationStartTimeNanos) / 1_000_000
-      )
-    )
 
     val outputMap = initOutputMap(getInterpreter())
+    val preprocTimeMillis = SystemClock.elapsedRealtime() - lastPreprocStartTimeMillis;
+    Trace.endSection()
 
-    val inferenceStartTimeNanos = SystemClock.elapsedRealtimeNanos()
+    Trace.beginSection("inference")
+    val inferenceStartTimeMillis = SystemClock.elapsedRealtime()
     getInterpreter().runForMultipleInputsOutputs(inputArray, outputMap)
-    lastInferenceTimeNanos = SystemClock.elapsedRealtimeNanos() - inferenceStartTimeNanos
-    Log.i(
-      "posenet",
-      String.format("Interpreter took %.2f ms", 1.0f * lastInferenceTimeNanos / 1_000_000)
-    )
+    val inferenceTimeMillis = SystemClock.elapsedRealtime() - inferenceStartTimeMillis
+    lastInferenceTimeNanos = inferenceTimeMillis * 1_000_000
+    Trace.endSection()
 
+    Trace.beginSection("postProcessing")
+    val postprocStartTimeMillis = SystemClock.elapsedRealtime()
     val heatmaps = outputMap[0] as Array<Array<Array<FloatArray>>>
     val offsets = outputMap[1] as Array<Array<Array<FloatArray>>>
 
@@ -271,6 +285,14 @@ class Posenet(
 
     person.keyPoints = keypointList.toList()
     person.score = totalScore / numKeypoints
+    Trace.endSection()
+
+    val postprocTimeMillis = SystemClock.elapsedRealtime() - postprocStartTimeMillis
+
+    postprocTimesMillis.add(postprocTimeMillis)
+    preprocTimesMillis.add(preprocTimeMillis)
+    inferenceTimesMillis.add(inferenceTimeMillis)
+    Trace.endSection()
 
     return person
   }

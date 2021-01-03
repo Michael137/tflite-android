@@ -40,10 +40,7 @@ import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
 import android.media.ImageReader
 import android.media.ImageReader.OnImageAvailableListener
-import android.os.Bundle
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.Process
+import android.os.*
 import android.support.v4.app.ActivityCompat
 import android.support.v4.app.DialogFragment
 import android.support.v4.app.Fragment
@@ -63,6 +60,7 @@ import kotlin.math.abs
 import org.tensorflow.lite.examples.posenet.lib.BodyPart
 import org.tensorflow.lite.examples.posenet.lib.Person
 import org.tensorflow.lite.examples.posenet.lib.Posenet
+import java.io.File
 
 class PosenetActivity :
   Fragment(),
@@ -244,7 +242,7 @@ class PosenetActivity :
     if (shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
       ConfirmationDialog().show(childFragmentManager, FRAGMENT_DIALOG)
     } else {
-      requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
+      requestPermissions(arrayOf(Manifest.permission.CAMERA, Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_CAMERA_PERMISSION)
     }
   }
 
@@ -412,9 +410,16 @@ class PosenetActivity :
         return
       }
 
+      Trace.beginSection("estimatePose");
+
+      Trace.beginSection("captureData")
+      val captureStart = SystemClock.elapsedRealtime()
+
       val image = imageReader.acquireLatestImage() ?: return
       fillBytes(image.planes, yuvBytes)
+      Trace.endSection()
 
+      Trace.beginSection("convertRawData")
       ImageUtils.convertYUV420ToARGB8888(
         yuvBytes[0]!!,
         yuvBytes[1]!!,
@@ -426,6 +431,11 @@ class PosenetActivity :
         /*uvPixelStride=*/ image.planes[1].pixelStride,
         rgbBytes
       )
+      posenet.captureTimesMillis.add(SystemClock.elapsedRealtime() - captureStart)
+      Trace.endSection()
+
+      posenet.lastPreprocStartTimeMillis = SystemClock.elapsedRealtime()
+      Trace.beginSection("preProcessing")
 
       // Create bitmap from int array
       val imageBitmap = Bitmap.createBitmap(
@@ -433,8 +443,10 @@ class PosenetActivity :
         Bitmap.Config.ARGB_8888
       )
 
+      Trace.beginSection("rotate")
       // Create rotated version for portrait display
       val rotateMatrix = Matrix()
+
       rotateMatrix.postRotate(90.0f)
 
       val rotatedBitmap = Bitmap.createBitmap(
@@ -442,8 +454,11 @@ class PosenetActivity :
         rotateMatrix, true
       )
       image.close()
+      Trace.endSection()
 
       processImage(rotatedBitmap)
+      Trace.endSection()
+      Trace.endSection()
     }
   }
 
@@ -576,16 +591,65 @@ class PosenetActivity :
 
   /** Process image using Posenet library.   */
   private fun processImage(bitmap: Bitmap) {
+    Trace.beginSection("crop")
     // Crop bitmap.
     val croppedBitmap = cropBitmap(bitmap)
+    Trace.endSection()
 
+    Trace.beginSection("scale")
     // Created scaled version of bitmap for model input.
     val scaledBitmap = Bitmap.createScaledBitmap(croppedBitmap, MODEL_WIDTH, MODEL_HEIGHT, true)
+    Trace.endSection()
 
-    // Perform inference.
+     // Perform inference.
     val person = posenet.estimateSinglePose(scaledBitmap)
-    val canvas: Canvas = surfaceHolder!!.lockCanvas()
-    draw(canvas, person, scaledBitmap)
+
+    val lastIdx = posenet.preprocTimesMillis.size - 1
+    if(lastIdx >= 0) {
+      // if (posenet.postprocTimesMillis.size == 100) {
+      //   Log.d(
+      //     "LATENCY",
+      //     String.format(
+      //       "Timecost: %f %f %f %f",
+      //       posenet.captureTimesMillis.average(),
+      //       posenet.preprocTimesMillis.average(),
+      //       posenet.inferenceTimesMillis.average(),
+      //       posenet.postprocTimesMillis.average()
+      //     )
+      //   )
+      //   posenet.captureTimesMillis.clear()
+      //   posenet.postprocTimesMillis.clear()
+      //   posenet.preprocTimesMillis.clear()
+      //   posenet.inferenceTimesMillis.clear()
+      // }
+
+      if(posenet.preprocTimesMillis.size == 1200)
+      {
+        val filename = "/sdcard/app_distributions/classify/" + posenet.filename + "_" + posenet.device_name + ".csv"
+        Log.d(TAG, "Saving to $filename")
+        val file = File(filename)
+        val sb = StringBuilder()
+
+          // Append strings from array
+        for (i in 0 until posenet.preprocTimesMillis.size) {
+          sb.append(posenet.captureTimesMillis[i].toString());
+          sb.append(",");
+          sb.append(posenet.preprocTimesMillis[i].toString());
+          sb.append(",");
+          sb.append(posenet.inferenceTimesMillis[i].toString());
+          sb.append(",");
+          sb.append(posenet.postprocTimesMillis[i].toString());
+          sb.append("\n");
+        }
+        file.printWriter().use { out ->
+          out.println(sb.toString())
+        }
+        System.exit(0);
+      }
+    }
+
+      val canvas: Canvas = surfaceHolder!!.lockCanvas()
+      draw(canvas, person, scaledBitmap)
   }
 
   /**

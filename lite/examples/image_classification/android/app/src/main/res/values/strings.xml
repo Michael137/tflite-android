@@ -8,6 +8,16 @@
         <item>Float_EfficientNet</item>
         <item>Quantized_MobileNet</item>
         <item>Float_MobileNet</item>
+        <item>Quantized_Inception</item>
+        <item>Float_Inception</item>
+    </string-array>
+
+    <string name="tfe_ic_option" translatable="false">NNAPI Options:</string>
+    <string-array name="tfe_ic_options" translatable="false">
+        <item>Fast Single Answer</item>
+        <item>Sustained Speed</item>
+        <item>Low Power</item>
+        <item>Undefined</item>
     </string-array>
 
     <string name="tfe_ic_device" translatable="false">Device:</string>
@@ -15,5 +25,8 @@
         <item>CPU</item>
         <item>GPU</item>
         <item>NNAPI</item>
+        <item>DSP</item>
+        <item>NNAPI_DSP</item>
+        <item>NNAPI_GPU</item>
     </string-array>
 </resources>

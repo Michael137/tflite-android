@@ -20,6 +20,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.SystemClock
+import android.os.Trace
 import androidx.core.graphics.ColorUtils
 import android.util.Log
 import java.io.FileInputStream
@@ -32,6 +33,7 @@ import kotlin.collections.HashSet
 import kotlin.random.Random
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 
 /**
  * Class responsible to run the Image Segmentation model.
@@ -47,9 +49,12 @@ import org.tensorflow.lite.gpu.GpuDelegate
  */
 class ImageSegmentationModelExecutor(
   context: Context,
-  private var useGPU: Boolean = false
+  private var useGPU: Boolean = false,
+  private var useNnapi: Boolean = false
 ) {
+  var captureTime = 0L
   private var gpuDelegate: GpuDelegate? = null
+  private var nnapiDelegate: NnApiDelegate? = null
 
   private val segmentationMasks: ByteBuffer
   private val interpreter: Interpreter
@@ -62,8 +67,7 @@ class ImageSegmentationModelExecutor(
   private var numberThreads = 4
 
   init {
-
-    interpreter = getInterpreter(context, imageSegmentationModel, useGPU)
+    interpreter = getInterpreter(context, imageSegmentationModel, useGPU, useNnapi)
     segmentationMasks = ByteBuffer.allocateDirect(1 * imageSize * imageSize * NUM_CLASSES * 4)
     segmentationMasks.order(ByteOrder.nativeOrder())
   }
@@ -73,12 +77,16 @@ class ImageSegmentationModelExecutor(
       fullTimeExecutionTime = SystemClock.uptimeMillis()
 
       preprocessTime = SystemClock.uptimeMillis()
+      Trace.beginSection("preProcess")
+      Trace.beginSection("scale")
       val scaledBitmap =
         ImageUtils.scaleBitmapAndKeepRatio(
           data,
           imageSize, imageSize
         )
+      Trace.endSection()
 
+      Trace.beginSection("normalize")
       val contentArray =
         ImageUtils.bitmapToByteBuffer(
           scaledBitmap,
@@ -87,19 +95,25 @@ class ImageSegmentationModelExecutor(
           IMAGE_MEAN,
           IMAGE_STD
         )
+      Trace.endSection()
+      Trace.endSection()
       preprocessTime = SystemClock.uptimeMillis() - preprocessTime
 
       imageSegmentationTime = SystemClock.uptimeMillis()
+      Trace.beginSection("modelExecution")
       interpreter.run(contentArray, segmentationMasks)
+      Trace.endSection()
       imageSegmentationTime = SystemClock.uptimeMillis() - imageSegmentationTime
       Log.d(TAG, "Time to run the model $imageSegmentationTime")
 
       maskFlatteningTime = SystemClock.uptimeMillis()
+      Trace.beginSection("maskFlattening")
       val (maskImageApplied, maskOnly, itensFound) =
         convertBytebufferMaskToBitmap(
           segmentationMasks, imageSize, imageSize, scaledBitmap,
           segmentColors
         )
+      Trace.endSection()
       maskFlatteningTime = SystemClock.uptimeMillis() - maskFlatteningTime
       Log.d(TAG, "Time to flatten the mask result $maskFlatteningTime")
 
@@ -149,7 +163,8 @@ class ImageSegmentationModelExecutor(
   private fun getInterpreter(
     context: Context,
     modelName: String,
-    useGpu: Boolean = false
+    useGpu: Boolean = false,
+    useNnapi: Boolean = false
   ): Interpreter {
     val tfliteOptions = Interpreter.Options()
     tfliteOptions.setNumThreads(numberThreads)
@@ -160,6 +175,12 @@ class ImageSegmentationModelExecutor(
       tfliteOptions.addDelegate(gpuDelegate)
     }
 
+    nnapiDelegate = null
+    if (useNnapi) {
+      nnapiDelegate = NnApiDelegate()
+      tfliteOptions.addDelegate(nnapiDelegate)
+    }
+
     return Interpreter(loadModelFile(context, modelName), tfliteOptions)
   }
 
@@ -168,6 +189,7 @@ class ImageSegmentationModelExecutor(
     sb.append("Input Image Size: $imageSize x $imageSize\n")
     sb.append("GPU enabled: $useGPU\n")
     sb.append("Number of threads: $numberThreads\n")
+    sb.append("Capture time: $captureTime ms\n")
     sb.append("Pre-process execution time: $preprocessTime ms\n")
     sb.append("Model execution time: $imageSegmentationTime ms\n")
     sb.append("Mask flatten time: $maskFlatteningTime ms\n")
@@ -179,6 +201,9 @@ class ImageSegmentationModelExecutor(
     interpreter.close()
     if (gpuDelegate != null) {
       gpuDelegate!!.close()
+    }
+    if (nnapiDelegate != null) {
+      nnapiDelegate!!.close()
     }
   }
 

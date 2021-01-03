@@ -16,6 +16,8 @@
 
 package org.tensorflow.lite.examples.imagesegmentation
 
+import android.os.SystemClock
+import android.os.Trace
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -43,10 +45,14 @@ class MLExecutionViewModel : ViewModel() {
     inferenceThread: ExecutorCoroutineDispatcher
   ) {
     viewModelScope.launch(inferenceThread) {
+      Trace.beginSection("convertRawData")
+      val captureTime = SystemClock.elapsedRealtime()
       val contentImage =
         ImageUtils.decodeBitmap(
           File(filePath)
         )
+      imageSegmentationModel.captureTime = SystemClock.elapsedRealtime() - captureTime
+      Trace.endSection()
 
       val result = imageSegmentationModel.execute(contentImage)
       _resultingBitmap.postValue(result)

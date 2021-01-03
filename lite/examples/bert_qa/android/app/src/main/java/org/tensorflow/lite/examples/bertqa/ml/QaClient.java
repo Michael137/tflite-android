@@ -17,6 +17,8 @@ package org.tensorflow.lite.examples.bertqa.ml;
 import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
+import android.os.SystemClock;
+import android.os.Trace;
 import android.support.annotation.WorkerThread;
 import android.util.Log;
 import com.google.common.base.Joiner;
@@ -58,6 +60,11 @@ public class QaClient implements AutoCloseable {
 
   private static final Joiner SPACE_JOINER = Joiner.on(" ");
 
+  private final ArrayList<Long> capture_times = new ArrayList<Long>();
+  private final ArrayList<Long> preproc_times = new ArrayList<Long>();
+  private final ArrayList<Long> postproc_times = new ArrayList<Long>();
+  private final ArrayList<Long> inference_times = new ArrayList<Long>();
+
   public QaClient(Context context) {
     this.context = context;
     this.featureConverter = new FeatureConverter(dic, DO_LOWER_CASE, MAX_QUERY_LEN, MAX_SEQ_LEN);
@@ -66,7 +73,7 @@ public class QaClient implements AutoCloseable {
   @WorkerThread
   public synchronized void loadModel() {
     try {
-      ByteBuffer buffer = loadModelFile(this.context.getAssets());
+      MappedByteBuffer buffer = loadModelFile(this.context.getAssets());
       Interpreter.Options opt = new Interpreter.Options();
       opt.setNumThreads(NUM_LITE_THREADS);
       tflite = new Interpreter(buffer, opt);
@@ -74,6 +81,17 @@ public class QaClient implements AutoCloseable {
     } catch (IOException ex) {
       Log.e(TAG, ex.getMessage());
     }
+  }
+
+  private double calculateAverage(List <Long> marks) {
+    Double sum = 0D;
+    if(!marks.isEmpty()) {
+      for (Long mark : marks) {
+        sum += mark;
+      }
+      return sum.doubleValue() / marks.size();
+    }
+    return sum;
   }
 
   @WorkerThread
@@ -102,13 +120,14 @@ public class QaClient implements AutoCloseable {
 
   /** Load tflite model from assets. */
   public MappedByteBuffer loadModelFile(AssetManager assetManager) throws IOException {
-    try (AssetFileDescriptor fileDescriptor = assetManager.openFd(MODEL_PATH);
-        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor())) {
-      FileChannel fileChannel = inputStream.getChannel();
-      long startOffset = fileDescriptor.getStartOffset();
-      long declaredLength = fileDescriptor.getDeclaredLength();
-      return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
-    }
+    Log.v(TAG, "READING MODEL: " + MODEL_PATH);
+    AssetFileDescriptor fileDescriptor = assetManager.openFd(MODEL_PATH);
+    Log.v(TAG,"OPENED MODEL: " + fileDescriptor.toString());
+    FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor());
+    FileChannel fileChannel = inputStream.getChannel();
+    long startOffset = fileDescriptor.getStartOffset();
+    long declaredLength = fileDescriptor.getDeclaredLength();
+    return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
   }
 
   /** Load dictionary from assets. */
@@ -130,11 +149,12 @@ public class QaClient implements AutoCloseable {
    */
   @WorkerThread
   public synchronized List<QaAnswer> predict(String query, String content) {
-    Log.v(TAG, "TFLite model: " + MODEL_PATH + " running...");
-    Log.v(TAG, "Convert Feature...");
+    Trace.beginSection("predicting");
+
+    Trace.beginSection("preProcessing");
+    final long preproc_start = SystemClock.elapsedRealtime();
     Feature feature = featureConverter.convert(query, content);
 
-    Log.v(TAG, "Set inputs...");
     int[][] inputIds = new int[1][MAX_SEQ_LEN];
     int[][] inputMask = new int[1][MAX_SEQ_LEN];
     int[][] segmentIds = new int[1][MAX_SEQ_LEN];
@@ -150,13 +170,37 @@ public class QaClient implements AutoCloseable {
     Map<Integer, Object> output = new HashMap<>();
     output.put(0, endLogits);
     output.put(1, startLogits);
+    final long preproc_time = SystemClock.elapsedRealtime() - preproc_start;
+    Trace.endSection();
 
-    Log.v(TAG, "Run inference...");
+    Trace.beginSection("inference");
+    final long inference_start = SystemClock.elapsedRealtime();
     tflite.runForMultipleInputsOutputs(inputs, output);
+    final long inference_time = SystemClock.elapsedRealtime() - inference_start;
+    Trace.endSection();
 
-    Log.v(TAG, "Convert answers...");
+    Trace.beginSection("postProcessing");
+    final long postproc_start = SystemClock.elapsedRealtime();
     List<QaAnswer> answers = getBestAnswers(startLogits[0], endLogits[0], feature);
-    Log.v(TAG, "Finish.");
+    final long postproc_time = SystemClock.elapsedRealtime() - postproc_start;
+    Trace.endSection(); // postProcessing
+
+    capture_times.add(0L);
+    preproc_times.add(preproc_time);
+    postproc_times.add(inference_time);
+    inference_times.add(postproc_time);
+
+    if(preproc_times.size() == 12) {
+      String cost_str = String.format("Timecosts: %f %f %f %f", calculateAverage(capture_times), calculateAverage(preproc_times), calculateAverage(inference_times), calculateAverage(postproc_times));
+      Log.v(TAG, cost_str);
+
+      capture_times.clear();
+      preproc_times.clear();
+      postproc_times.clear();
+      inference_times.clear();
+    }
+
+    Trace.endSection(); // predicting
     return answers;
   }
 
@@ -204,6 +248,7 @@ public class QaClient implements AutoCloseable {
       QaAnswer ans = new QaAnswer(convertedText, origResults.get(i));
       answers.add(ans);
     }
+
     return answers;
   }
 

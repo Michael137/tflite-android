@@ -61,7 +61,7 @@ public class ClassifierTest {
       Bitmap input = loadImage(imageFileName);
       List<Recognition> goldenOutput = loadRecognitions(goldenOutputFileName);
 
-      List<Recognition> result = classifier.recognizeImage(input, 0);
+      List<Recognition> result = classifier.recognizeImage(input, 0, 0);
       Iterator<Recognition> goldenOutputIterator = goldenOutput.iterator();
 
       for (Recognition actual : result) {
